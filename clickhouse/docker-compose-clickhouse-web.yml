@@ -1,0 +1,74 @@
+# ClickHouse + dnsmonster + dnsmonster-web
+#
+# dnsmonster listens for DNSTap on port 5555, web UI on port 8080.
+# Data stored locally under ./clickhouse-data
+#
+# Usage:
+#   docker compose -f docker-compose-clickhouse-web.yml up -d
+#
+# Send dnstap traffic to localhost:5555, then open http://localhost:8080
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
+    networks:
+      - overlay
+    environment:
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=
+    volumes:
+      - "./clickhouse-data:/var/lib/clickhouse"
+      - "./tables.sql:/docker-entrypoint-initdb.d/tables.sql:ro"
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  dnsmonster:
+    image: ghcr.io/mosajjal/dnsmonster:latest
+    restart: unless-stopped
+    networks:
+      - overlay
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "5555:5555"
+    command:
+      - "--dnstapSocket=tcp://0.0.0.0:5555"
+      - "--clickhouseOutputType=1"
+      - "--clickhouseAddress=clickhouse:9000"
+      - "--clickhouseDelay=1s"
+      - "--clickhouseBatchSize=100000"
+
+  web:
+    build:
+      context: ../web
+      dockerfile_inline: |
+        FROM golang:1.24-alpine AS build
+        WORKDIR /src
+        COPY go.mod go.sum ./
+        RUN go mod download
+        COPY . .
+        RUN go build -o /dnsmonster-web ./cmd/dnsmonster-web
+        FROM alpine:3.21
+        COPY --from=build /dnsmonster-web /usr/local/bin/dnsmonster-web
+        ENTRYPOINT ["dnsmonster-web"]
+    restart: unless-stopped
+    networks:
+      - overlay
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    command:
+      - "--listen=:8080"
+      - "--clickhouse-addr=clickhouse:9000"
+      - "--clickhouse-table=DNS_LOG"
+      - "--dnsmonster-api=http://dnsmonster:2112/metric"
+
+networks:
+  overlay:
